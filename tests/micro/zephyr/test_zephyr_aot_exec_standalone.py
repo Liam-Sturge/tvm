@@ -14,34 +14,27 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-import io
-import logging
 import os
-import sys
-import logging
 import pathlib
-import tarfile
-import tempfile
 
 import pytest
 import numpy as np
 
 import tvm
 import tvm.testing
+import tvm.micro.testing
 from tvm.micro.project_api import server
 import tvm.relay as relay
 from tvm.relay.backend import Executor, Runtime
-
 from tvm.contrib.download import download_testdata
 
-import test_utils
+from . import utils
 
 
 @tvm.testing.requires_micro
 @pytest.mark.skip_boards(["mps2_an521", "mps3_an547"])
-def test_tflite(workspace_dir, board, west_cmd, microtvm_debug):
+def test_tflite(workspace_dir, board, microtvm_debug, serial_number):
     """Testing a TFLite model."""
-    model = test_utils.ZEPHYR_BOARDS[board]
     input_shape = (1, 49, 10, 1)
     output_shape = (1, 12)
     build_config = {"debug": microtvm_debug}
@@ -65,7 +58,7 @@ def test_tflite(workspace_dir, board, west_cmd, microtvm_debug):
         tflite_model, shape_dict={"input_1": input_shape}, dtype_dict={"input_1 ": "int8"}
     )
 
-    target = tvm.target.target.micro(model)
+    target = tvm.micro.testing.get_target("zephyr", board)
     executor = Executor(
         "aot", {"unpacked-api": True, "interface-api": "c", "workspace-byte-alignment": 4}
     )
@@ -77,30 +70,29 @@ def test_tflite(workspace_dir, board, west_cmd, microtvm_debug):
     sample_path = download_testdata(sample_url, "keyword_spotting_int8_6.pyc.npy", module="data")
     sample = np.load(sample_path)
 
-    project, _ = test_utils.generate_project(
+    project, _ = utils.generate_project(
         workspace_dir,
         board,
-        west_cmd,
         lowered,
         build_config,
         sample,
         output_shape,
         "int8",
-        load_cmsis=False,
+        False,
+        serial_number,
     )
 
-    result, time = test_utils.run_model(project)
+    result, _ = utils.run_model(project)
     assert result == 6
 
 
 @tvm.testing.requires_micro
 @pytest.mark.skip_boards(["mps2_an521", "mps3_an547"])
-def test_qemu_make_fail(workspace_dir, board, west_cmd, microtvm_debug):
+def test_qemu_make_fail(workspace_dir, board, microtvm_debug, serial_number):
     """Testing QEMU make fail."""
-    if board not in ["qemu_x86", "mps2_an521", "mps3_an547"]:
+    if not utils.ZEPHYR_BOARDS[board]["is_qemu"]:
         pytest.skip(msg="Only for QEMU targets.")
 
-    model = test_utils.ZEPHYR_BOARDS[board]
     build_config = {"debug": microtvm_debug}
     shape = (10,)
     dtype = "float32"
@@ -112,23 +104,23 @@ def test_qemu_make_fail(workspace_dir, board, west_cmd, microtvm_debug):
     func = relay.Function([x], z)
     ir_mod = tvm.IRModule.from_expr(func)
 
-    target = tvm.target.target.micro(model)
+    target = tvm.micro.testing.get_target("zephyr", board)
     executor = Executor("aot")
     runtime = Runtime("crt")
     with tvm.transform.PassContext(opt_level=3, config={"tir.disable_vectorize": True}):
         lowered = relay.build(ir_mod, target, executor=executor, runtime=runtime)
 
     sample = np.zeros(shape=shape, dtype=dtype)
-    project, project_dir = test_utils.generate_project(
+    project, project_dir = utils.generate_project(
         workspace_dir,
         board,
-        west_cmd,
         lowered,
         build_config,
         sample,
         shape,
         dtype,
-        load_cmsis=False,
+        False,
+        serial_number,
     )
 
     file_path = pathlib.Path(project_dir) / "build" / "build.ninja"

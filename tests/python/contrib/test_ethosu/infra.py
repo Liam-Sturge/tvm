@@ -133,7 +133,7 @@ def create_test_runner(
     ethosu_variant = ethosu_variant.upper()
 
     prologue = """
-    uart_init();
+    UartStdOutInit();
     EthosuInit();
 
     struct ethosu_driver* ethos_u = ethosu_reserve_driver();
@@ -148,7 +148,7 @@ def create_test_runner(
     __attribute__((section(".bss.noinit.tvm"), aligned(16)))
     static uint8_t {pool.pool_name}[{_get_workspace_size_define_macro(pool.pool_name)}];
     #endif
-    
+
             """
             )
 
@@ -158,7 +158,7 @@ def create_test_runner(
         epilogue="""
         ethosu_release_driver(ethos_u);
         """,
-        includes=["uart.h", "ethosu_55.h", "ethosu_mod.h", "hard_fault.h"],
+        includes=["uart_stdout.h", "ethosu_55.h", "ethosu_mod.h", "hard_fault.h"],
         parameters={
             "ETHOSU_TEST_ROOT": test_root,
             "NPU_MACS": ethosu_macs,

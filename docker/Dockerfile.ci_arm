@@ -26,6 +26,9 @@ RUN apt-get update --fix-missing
 
 RUN apt-install-and-clear -y ca-certificates gnupg2
 
+COPY install/ubuntu_setup_tz.sh /install/ubuntu_setup_tz.sh
+RUN bash /install/ubuntu_setup_tz.sh
+
 COPY install/ubuntu_install_core.sh /install/ubuntu_install_core.sh
 RUN bash /install/ubuntu_install_core.sh
 
@@ -53,7 +56,7 @@ RUN bash /install/ubuntu_install_llvm.sh
 ENV TVM_VENV /venv/apache-tvm-py3.7
 COPY python/bootstrap/lockfiles /install/python/bootstrap/lockfiles
 COPY install/ubuntu_install_python.sh /install/ubuntu_install_python.sh
-RUN bash /install/ubuntu_install_python.sh
+RUN bash /install/ubuntu_install_python.sh 3.7
 ENV PATH ${TVM_VENV}/bin:$PATH
 ENV PYTHONNOUSERSITE 1  # Disable .local directory from affecting CI.
 

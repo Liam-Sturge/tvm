@@ -29,6 +29,8 @@
 
 #include <unordered_map>
 
+#include "ndarray_hash_equal.h"
+
 namespace tvm {
 
 TVM_REGISTER_OBJECT_TYPE(ObjectPathPairNode);
@@ -200,8 +202,12 @@ bool SEqualReducer::ObjectAttrsEqual(const ObjectRef& lhs, const ObjectRef& rhs,
  */
 class SEqualHandlerDefault::Impl {
  public:
-  Impl(SEqualHandlerDefault* parent, bool assert_mode, Optional<ObjectPathPair>* first_mismatch)
-      : parent_(parent), assert_mode_(assert_mode), first_mismatch_(first_mismatch) {}
+  Impl(SEqualHandlerDefault* parent, bool assert_mode, Optional<ObjectPathPair>* first_mismatch,
+       bool defer_fails)
+      : parent_(parent),
+        assert_mode_(assert_mode),
+        first_mismatch_(first_mismatch),
+        defer_fails_(defer_fails) {}
 
   bool SEqualReduce(const ObjectRef& lhs, const ObjectRef& rhs, bool map_free_vars,
                     const Optional<ObjectPathPair>& current_paths) {
@@ -243,6 +249,8 @@ class SEqualHandlerDefault::Impl {
     pending_tasks_.emplace_back(Task::ForceFailTag{}, mismatch_paths);
   }
 
+  bool IsFailDeferralEnabled() { return defer_fails_; }
+
   void MarkGraphNode() {
     // need to push to pending tasks in this case
     ICHECK(!allow_push_to_stack_ && !task_stack_.empty());
@@ -262,6 +270,8 @@ class SEqualHandlerDefault::Impl {
     pending_tasks_.clear();
     equal_map_lhs_.clear();
     equal_map_rhs_.clear();
+    root_lhs_ = lhs;
+    root_rhs_ = rhs;
 
     Optional<ObjectPathPair> current_paths;
     if (IsPathTracingEnabled()) {
@@ -291,23 +301,19 @@ class SEqualHandlerDefault::Impl {
       }
       if (equal_map_rhs_.count(rhs)) return false;
 
-      SEqualReducer reducer = GetReducer(lhs, rhs, map_free_vars, current_paths);
-      return vtable_->SEqualReduce(lhs.get(), rhs.get(), reducer);
+      if (!IsPathTracingEnabled()) {
+        return vtable_->SEqualReduce(lhs.get(), rhs.get(),
+                                     SEqualReducer(parent_, nullptr, map_free_vars));
+      } else {
+        PathTracingData tracing_data = {current_paths.value(), lhs, rhs, first_mismatch_};
+        return vtable_->SEqualReduce(lhs.get(), rhs.get(),
+                                     SEqualReducer(parent_, &tracing_data, map_free_vars));
+      }
     };
     return CheckResult(compute(), lhs, rhs, current_paths);
   }
 
  protected:
-  SEqualReducer GetReducer(const ObjectRef& lhs, const ObjectRef& rhs, bool map_free_vars,
-                           const Optional<ObjectPathPair>& current_paths) {
-    if (!IsPathTracingEnabled()) {
-      return SEqualReducer(parent_, nullptr, map_free_vars);
-    } else {
-      PathTracingData tracing_data = {current_paths.value(), lhs, rhs, first_mismatch_};
-      return SEqualReducer(parent_, &tracing_data, map_free_vars);
-    }
-  }
-
   // Check the result.
   bool CheckResult(bool result, const ObjectRef& lhs, const ObjectRef& rhs,
                    const Optional<ObjectPathPair>& current_paths) {
@@ -315,10 +321,38 @@ class SEqualHandlerDefault::Impl {
       *first_mismatch_ = current_paths;
     }
     if (assert_mode_ && !result) {
-      LOG(FATAL) << "ValueError: StructuralEqual check failed, caused by lhs:" << std::endl
-                 << PrettyPrint(lhs) << std::endl
-                 << "and rhs:" << std::endl
-                 << PrettyPrint(rhs);
+      std::ostringstream oss;
+      oss << "ValueError: StructuralEqual check failed, caused by lhs";
+      if (first_mismatch_->defined()) {
+        oss << " at " << first_mismatch_->value()->lhs_path;
+        if (root_lhs_.defined()) {
+          Map<String, ObjectRef> dict = {{"path_to_underline", first_mismatch_->value()->lhs_path},
+                                         {"syntax_sugar", Bool(false)}};
+          PrinterConfig cfg(dict);
+          // The TVMScriptPrinter::Script will fallback to Repr printer,
+          // if the root node to print is not supported yet,
+          // e.g. Relay nodes, ArrayNode, MapNode, etc.
+          oss << ":" << std::endl << TVMScriptPrinter::Script(root_lhs_.value(), cfg);
+        }
+      } else {
+        oss << ":" << std::endl << lhs;
+      }
+      oss << std::endl << "and rhs";
+      if (first_mismatch_->defined()) {
+        oss << " at " << first_mismatch_->value()->rhs_path;
+        if (root_rhs_.defined()) {
+          Map<String, ObjectRef> dict = {{"path_to_underline", first_mismatch_->value()->rhs_path},
+                                         {"syntax_sugar", Bool(false)}};
+          PrinterConfig cfg(dict);
+          // The TVMScriptPrinter::Script will fallback to Repr printer,
+          // if the root node to print is not supported yet,
+          // e.g. Relay nodes, ArrayNode, MapNode, etc.
+          oss << ":" << std::endl << TVMScriptPrinter::Script(root_rhs_.value(), cfg);
+        }
+      } else {
+        oss << ":" << std::endl << rhs;
+      }
+      LOG(FATAL) << oss.str();
     }
     return result;
   }
@@ -421,7 +455,8 @@ class SEqualHandlerDefault::Impl {
   bool allow_push_to_stack_{true};
   //  If in assert mode, must return true, and will throw error otherwise.
   bool assert_mode_{false};
-  // Location to store the paths to the first detected mismatch, or nullptr to disable path tracing.
+  // Location to store the paths to the first detected mismatch, or nullptr to disable path
+  // tracing.
   Optional<ObjectPathPair>* first_mismatch_;
   // reflection vtable
   ReflectionVTable* vtable_ = ReflectionVTable::Global();
@@ -429,11 +464,18 @@ class SEqualHandlerDefault::Impl {
   std::unordered_map<ObjectRef, ObjectRef, ObjectPtrHash, ObjectPtrEqual> equal_map_lhs_;
   // map from rhs to lhs
   std::unordered_map<ObjectRef, ObjectRef, ObjectPtrHash, ObjectPtrEqual> equal_map_rhs_;
+  // root lhs for result printing
+  Optional<ObjectRef> root_lhs_;
+  // root rhs for result printing
+  Optional<ObjectRef> root_rhs_;
+  // whether to defer fails
+  bool defer_fails_;
 };
 
 SEqualHandlerDefault::SEqualHandlerDefault(bool assert_mode,
-                                           Optional<ObjectPathPair>* first_mismatch) {
-  impl = new Impl(this, assert_mode, first_mismatch);
+                                           Optional<ObjectPathPair>* first_mismatch,
+                                           bool defer_fails) {
+  impl = new Impl(this, assert_mode, first_mismatch, defer_fails);
 }
 
 SEqualHandlerDefault::~SEqualHandlerDefault() { delete impl; }
@@ -447,6 +489,8 @@ bool SEqualHandlerDefault::SEqualReduce(const ObjectRef& lhs, const ObjectRef& r
 void SEqualHandlerDefault::DeferFail(const ObjectPathPair& mismatch_paths) {
   impl->DeferFail(mismatch_paths);
 }
+
+bool SEqualHandlerDefault::IsFailDeferralEnabled() { return impl->IsFailDeferralEnabled(); }
 
 ObjectRef SEqualHandlerDefault::MapLhsToRhs(const ObjectRef& lhs) { return impl->MapLhsToRhs(lhs); }
 
@@ -465,19 +509,55 @@ bool SEqualHandlerDefault::DispatchSEqualReduce(const ObjectRef& lhs, const Obje
 TVM_REGISTER_GLOBAL("node.StructuralEqual")
     .set_body_typed([](const ObjectRef& lhs, const ObjectRef& rhs, bool assert_mode,
                        bool map_free_vars) {
-      return SEqualHandlerDefault(assert_mode, nullptr).Equal(lhs, rhs, map_free_vars);
+      Optional<ObjectPathPair> first_mismatch;
+      return SEqualHandlerDefault(assert_mode, &first_mismatch, false)
+          .Equal(lhs, rhs, map_free_vars);
     });
 
 TVM_REGISTER_GLOBAL("node.GetFirstStructuralMismatch")
     .set_body_typed([](const ObjectRef& lhs, const ObjectRef& rhs, bool map_free_vars) {
       Optional<ObjectPathPair> first_mismatch;
-      bool equal = SEqualHandlerDefault(false, &first_mismatch).Equal(lhs, rhs, map_free_vars);
+      bool equal =
+          SEqualHandlerDefault(false, &first_mismatch, true).Equal(lhs, rhs, map_free_vars);
       ICHECK(equal == !first_mismatch.defined());
       return first_mismatch;
     });
 
 bool StructuralEqual::operator()(const ObjectRef& lhs, const ObjectRef& rhs) const {
-  return SEqualHandlerDefault(false, nullptr).Equal(lhs, rhs, false);
+  return SEqualHandlerDefault(false, nullptr, false).Equal(lhs, rhs, false);
+}
+
+bool NDArrayEqual(const runtime::NDArray::Container* lhs, const runtime::NDArray::Container* rhs,
+                  SEqualReducer equal, bool compare_data) {
+  if (lhs == rhs) return true;
+
+  auto ldt = lhs->dl_tensor.dtype;
+  auto rdt = rhs->dl_tensor.dtype;
+  ICHECK_EQ(lhs->dl_tensor.device.device_type, kDLCPU) << "can only compare CPU tensor";
+  ICHECK_EQ(rhs->dl_tensor.device.device_type, kDLCPU) << "can only compare CPU tensor";
+  ICHECK(runtime::IsContiguous(lhs->dl_tensor)) << "Can only compare contiguous tensor";
+  ICHECK(runtime::IsContiguous(rhs->dl_tensor)) << "Can only compare contiguous tensor";
+
+  if (lhs->dl_tensor.ndim != rhs->dl_tensor.ndim) return false;
+  for (int i = 0; i < lhs->dl_tensor.ndim; ++i) {
+    if (!equal(lhs->dl_tensor.shape[i], rhs->dl_tensor.shape[i])) return false;
+  }
+  if (ldt.code == rdt.code && ldt.lanes == rdt.lanes && ldt.bits == rdt.bits) {
+    size_t data_size = runtime::GetDataSize(lhs->dl_tensor);
+    if (compare_data) {
+      return std::memcmp(lhs->dl_tensor.data, rhs->dl_tensor.data, data_size) == 0;
+    } else {
+      return true;
+    }
+  } else {
+    return false;
+  }
+}
+
+bool NDArrayContainerTrait::SEqualReduce(const runtime::NDArray::Container* lhs,
+                                         const runtime::NDArray::Container* rhs,
+                                         SEqualReducer equal) {
+  return NDArrayEqual(lhs, rhs, equal, true);
 }
 
 }  // namespace tvm

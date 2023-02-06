@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include "../module_equality.h"
 #include "../utils.h"
 
 namespace tvm {
@@ -23,6 +24,8 @@ namespace meta_schedule {
 
 class MemoryDatabaseNode : public DatabaseNode {
  public:
+  explicit MemoryDatabaseNode(String mod_eq_name = "structural") : DatabaseNode(mod_eq_name) {}
+
   Array<TuningRecord> records;
   Array<Workload> workloads;
 
@@ -37,7 +40,7 @@ class MemoryDatabaseNode : public DatabaseNode {
  public:
   bool HasWorkload(const IRModule& mod) final {
     for (const auto& workload : workloads) {
-      if (StructuralEqual()(workload->mod, mod)) {
+      if (GetModuleEquality().Equal(workload->mod, mod)) {
         return true;
       }
     }
@@ -46,11 +49,11 @@ class MemoryDatabaseNode : public DatabaseNode {
 
   Workload CommitWorkload(const IRModule& mod) final {
     for (const auto& workload : workloads) {
-      if (StructuralEqual()(workload->mod, mod)) {
+      if (GetModuleEquality().Equal(workload->mod, mod)) {
         return workload;
       }
     }
-    Workload workload(mod, StructuralHash()(mod));
+    Workload workload(mod, GetModuleEquality().Hash(mod));
     workloads.push_back(workload);
     return workload;
   }
@@ -58,37 +61,38 @@ class MemoryDatabaseNode : public DatabaseNode {
   void CommitTuningRecord(const TuningRecord& record) final { records.push_back(record); }
 
   Array<TuningRecord> GetTopK(const Workload& workload, int top_k) final {
-    std::vector<std::pair<double, TuningRecord>> results;
-    results.reserve(this->records.size());
+    CHECK_GE(top_k, 0) << "ValueError: top_k must be non-negative";
+    if (top_k == 0) {
+      return {};
+    }
+    std::vector<TuningRecord> results;
+    results.reserve(records.size());
     for (const TuningRecord& record : records) {
-      if (!record->run_secs.defined()) {
+      auto run_secs = record->run_secs;
+      if (!run_secs.defined() || run_secs.value().empty() ||
+          std::all_of(run_secs.value().begin(), run_secs.value().end(),
+                      // kMaxMeanTime(1e10) is used as a stub for undefined measurement times.
+                      [](tvm::FloatImm v) {
+                        return v.defined() &&
+                               v->value == SortTuningRecordByMeanRunSecs::kMaxMeanTime;
+                      })) {
         continue;
       }
-      Array<FloatImm> run_secs = record->run_secs.value();
-      if (run_secs.empty()) {
-        continue;
-      }
-      if (record->workload.same_as(workload)) {
-        double sum = 0.0;
-        for (const FloatImm& i : run_secs) {
-          sum += i->value;
-        }
-        results.emplace_back(sum / run_secs.size(), record);
+      if (record->workload.same_as(workload) ||
+          WorkloadEqual(GetModuleEquality())(record->workload, workload)) {
+        results.emplace_back(record);
       }
     }
-    std::sort(results.begin(), results.end());
-    auto begin = results.begin();
-    auto end = results.end();
-    if (static_cast<int>(results.size()) > top_k) {
-      end = begin + top_k;
+    std::stable_sort(results.begin(), results.end(), SortTuningRecordByMeanRunSecs());
+    if (results.size() > static_cast<size_t>(top_k)) {
+      return {results.begin(), results.end() + top_k};
+    } else {
+      if (results.size() < static_cast<size_t>(top_k)) {
+        LOG(WARNING) << "The size of the GetTopK result is smaller than requested. There are not "
+                        "enough valid records in the database for this workload.";
+      }
+      return results;
     }
-    Array<TuningRecord> ret;
-    ret.reserve(end - begin);
-    while (begin != end) {
-      ret.push_back(begin->second);
-      ++begin;
-    }
-    return ret;
   }
 
   Array<TuningRecord> GetAllTuningRecords() final { return records; }
@@ -96,8 +100,8 @@ class MemoryDatabaseNode : public DatabaseNode {
   int64_t Size() final { return records.size(); }
 };
 
-Database Database::MemoryDatabase() {
-  ObjectPtr<MemoryDatabaseNode> n = make_object<MemoryDatabaseNode>();
+Database Database::MemoryDatabase(String mod_eq_name) {
+  ObjectPtr<MemoryDatabaseNode> n = make_object<MemoryDatabaseNode>(mod_eq_name);
   n->records.clear();
   n->workloads.clear();
   return Database(n);

@@ -919,6 +919,7 @@ def test_forward_interpolate():
             use_scale=False,
             use_list=False,
             use_const=False,
+            use_scaler=False,
         ):
             super(Interpolate, self).__init__()
             self.mode = mode
@@ -928,6 +929,7 @@ def test_forward_interpolate():
             self.use_scale = use_scale
             self.use_list = use_list
             self.use_const = use_const
+            self.use_scaler = use_scaler
 
         @paddle.jit.to_static
         def forward(self, x):
@@ -939,9 +941,13 @@ def test_forward_interpolate():
             elif not self.use_const:
                 size0 = paddle.to_tensor(size[0:1])
                 size = [size0, int(size[1])]
-            else:
+            elif not self.use_scaler:
                 size = size.tolist()
                 scale = scale.tolist()
+            else:
+                size = list(size)
+                h, w = paddle.rand(size).shape  # add decrease_axis
+                size = [h, w]
             if not self.use_scale:
                 return paddle.nn.functional.interpolate(
                     x,
@@ -965,6 +971,7 @@ def test_forward_interpolate():
     verify_model(Interpolate(), input_data)
     verify_model(Interpolate(use_list=True), input_data)
     verify_model(Interpolate(use_scale=True, use_const=True), input_data)
+    verify_model(Interpolate(use_const=True, use_scaler=True), input_data)
     verify_model(Interpolate("bilinear", use_scale=True), input_data)
     verify_model(Interpolate("bilinear", use_scale=True, align_corners=True), input_data)
     verify_model(
@@ -1344,6 +1351,11 @@ def test_forward_slice():
         x1 = paddle.to_tensor([3]) + paddle.to_tensor([1])
         return inputs[:, x0:, 1:x1, :]
 
+    @paddle.jit.to_static
+    def slice5(inputs):
+        b, c, h, w = inputs  # add decrease_axis
+        return h
+
     input_shape = [1, 3, 10, 10]
     input_data = paddle.rand(input_shape, dtype="float32")
     verify_model(
@@ -1355,6 +1367,7 @@ def test_forward_slice():
     verify_model(slice2, input_data=input_data)
     verify_model(slice3, input_data=paddle.randn((4, 4)))
     verify_model(slice4, input_data=input_data)
+    # verify_model(slice5, input_data=paddle.randn((4,)))
 
 
 @tvm.testing.uses_gpu
@@ -1674,5 +1687,41 @@ def test_forward_rnn():
         )
 
 
+@tvm.testing.uses_gpu
+def test_forward_topk():
+    @paddle.jit.to_static
+    def topk1(inputs):
+        return paddle.topk(inputs, k=1)
+
+    @paddle.jit.to_static
+    def topk2(inputs):
+        k = paddle.to_tensor([1], dtype=paddle.int32)
+        return paddle.topk(inputs, k=k)
+
+    @paddle.jit.to_static
+    def topk3(inputs):
+        return paddle.topk(inputs, k=1, largest=False)
+
+    @paddle.jit.to_static
+    def topk4(inputs):
+        return paddle.topk(inputs, k=2, sorted=True)
+
+    @paddle.jit.to_static
+    def topk5(inputs):
+        return paddle.topk(inputs, k=2, sorted=False)
+
+    @paddle.jit.to_static
+    def topk6(inputs):
+        return paddle.topk(inputs, k=1, axis=0)
+
+    input_data = paddle.to_tensor([[1, 4, 5, 7], [3, 6, 2, 5]], dtype=paddle.int32)
+    verify_model(topk1, input_data=input_data)
+    # verify_model(topk2, input_data=input_data)
+    verify_model(topk3, input_data=input_data)
+    verify_model(topk4, input_data=input_data)
+    verify_model(topk5, input_data=input_data)
+    verify_model(topk6, input_data=input_data)
+
+
 if __name__ == "__main__":
-    pytest.main([__file__])
+    tvm.testing.main()

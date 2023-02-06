@@ -25,7 +25,7 @@
 
 #include "utils.h"
 
-#include <tvm/parser/parser.h>
+#include <tvm/relay/parser.h>
 #include <tvm/relay/qnn/transform.h>
 #include <tvm/runtime/ndarray.h>
 #include <tvm/tir/stmt_functor.h>
@@ -416,7 +416,7 @@ Optional<tir::PrimFunc> DefaultTIRConverterImpl(const Array<te::Tensor>& args,
       return NullOpt;
     }
   }
-  PrimFunc func = te::CreatePrimFuncWithConstants(args, constants);
+  PrimFunc func = te::CreatePrimFuncWithConstants(args, constants, DataType::Int(64));
   bool dynamic_loop_extent = false;
   tir::PostOrderVisit(func->body, [&dynamic_loop_extent](const ObjectRef& obj) -> void {
     if (const auto* loop = obj.as<tir::ForNode>()) {
